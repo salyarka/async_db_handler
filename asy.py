@@ -2,16 +2,12 @@ import asyncio
 import functools
 import signal
 import os
-import select
 
 from psycopg2 import connect
 from datetime import datetime
 
 from postgres_access import PostgresAccess
 
-
-# TODO: exit programm when catch signal SIGTERM
-# go away from select
 
 async def lala():
     try:
@@ -30,22 +26,31 @@ async def lolo():
     except asyncio.CancelledError:
         print('Task lolo canceled!')
 
+
+def call(fd):
+    fd.poll()
+    while fd.notifies:
+        notification = fd.notifies.pop()
+        print('got notification', notification)
+
+async def watch(fd):
+    future = asyncio.Future()
+    loop.add_reader(fd, call, fd)
+    future.add_done_callback(lambda f: loop.remove_reader(fd))
+    await future
+
+
 async def catch_notify():
     try:
         with PostgresAccess(pg_conn) as db:
             db.execute('LISTEN task;')
             while True:
-                if select.select([pg_conn], [], [], 5) == ([], [], []):
-                    continue
-                pg_conn.poll()
-                while pg_conn.notifies:
-                    notification = pg_conn.notifies.pop()
-                    print('got notification', notification)
+                await watch(pg_conn)
     except asyncio.CancelledError:
         print('Task catch_notify canceled!')
 
 
-async def exit():
+async def stop():
     # TODO: RuntimeWarning: coroutine 'exit' was never awaited
     tasks = [
         t for t in asyncio.Task.all_tasks()
@@ -62,21 +67,20 @@ loop = asyncio.get_event_loop()
 for signame in ('SIGINT', 'SIGTERM'):
     loop.add_signal_handler(
         getattr(signal, signame),
-        functools.partial(asyncio.ensure_future, exit())
+        functools.partial(asyncio.ensure_future, stop())
     )
 
-#asyncio.ensure_future(lala(), loop=loop)
-#asyncio.ensure_future(lolo(), loop=loop)
+# asyncio.ensure_future(lala(), loop=loop)
+# asyncio.ensure_future(lolo(), loop=loop)
 asyncio.ensure_future(catch_notify(), loop=loop)
 
-if __name__ == '__main__':
-    pg_uri = os.getenv('PG_URI')
-    if pg_uri is None:
-        print('Environment variable PG_URI is not defined!!!')
-        exit(1)
-    pg_conn = connect(pg_uri)
-    try:
-        loop.run_forever()
-    finally:
-        loop.close()
-
+# if __name__ == '__main__':
+pg_uri = os.getenv('PG_URI')
+if pg_uri is None:
+    print('Environment variable PG_URI is not defined!!!')
+    exit(1)
+pg_conn = connect(pg_uri)
+try:
+    loop.run_forever()
+finally:
+    loop.close()
