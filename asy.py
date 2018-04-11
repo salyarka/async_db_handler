@@ -4,39 +4,28 @@ import signal
 import os
 
 from psycopg2 import connect
-from datetime import datetime
 
 from postgres_access import PostgresAccess
 
 
-async def lala():
-    try:
-        while True:
-            print('lala', datetime.now())
-            await asyncio.sleep(3)
-    except asyncio.CancelledError:
-        print('Task lala canceled!')
-
-
-async def lolo():
-    try:
-        while True:
-            print('lolo', datetime.now())
-            await asyncio.sleep(5)
-    except asyncio.CancelledError:
-        print('Task lolo canceled!')
-
-
-def call(fd):
+def get_notification(fd):
     fd.poll()
     while fd.notifies:
         notification = fd.notifies.pop()
         print('got notification', notification)
+        for ev in evs:
+            if not ev.is_set():
+                ev.data = notification
+                ev.set()
+                break
+        else:
+            pass
+    # TODO: if all workers are busy, wait for free worker
 
 async def watch(fd):
     future = asyncio.Future()
-    loop.add_reader(fd, call, fd)
-    future.add_done_callback(lambda f: loop.remove_reader(fd))
+    loop.add_reader(fd, get_notification, fd)
+    future.add_done_callback(lambda x: loop.remove_reader(fd))
     await future
 
 
@@ -48,6 +37,15 @@ async def catch_notify():
                 await watch(pg_conn)
     except asyncio.CancelledError:
         print('Task catch_notify canceled!')
+
+async def worker(ev):
+    try:
+        while True:
+            await ev.wait()
+            print('!!! worker receive')
+            ev.clear()
+    except asyncio.CancelledError:
+        print('Worker canceled!')
 
 
 async def stop():
@@ -64,14 +62,16 @@ async def stop():
 
 loop = asyncio.get_event_loop()
 
+evs = [asyncio.Event() for each in range(10)]
+
 for signame in ('SIGINT', 'SIGTERM'):
     loop.add_signal_handler(
         getattr(signal, signame),
         functools.partial(asyncio.ensure_future, stop())
     )
 
-# asyncio.ensure_future(lala(), loop=loop)
-# asyncio.ensure_future(lolo(), loop=loop)
+for i in range(10):
+    asyncio.ensure_future(worker(evs[i]), loop=loop)
 asyncio.ensure_future(catch_notify(), loop=loop)
 
 # if __name__ == '__main__':
