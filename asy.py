@@ -8,6 +8,12 @@ from psycopg2 import connect
 from postgres_access import PostgresAccess
 
 
+# TODO: redesign all variables, ???go away from global???, create connections for workers
+
+
+deferred_tasks = []
+
+
 def get_notification(fd):
     fd.poll()
     while fd.notifies:
@@ -19,8 +25,8 @@ def get_notification(fd):
                 ev.set()
                 break
         else:
-            pass
-    # TODO: if all workers are busy, wait for free worker
+            print('!!! put task to deferred')
+            deferred_tasks.append(notification)
 
 async def watch(fd):
     future = asyncio.Future()
@@ -34,6 +40,8 @@ async def catch_notify():
         with PostgresAccess(pg_conn) as db:
             db.execute('LISTEN task;')
             while True:
+                # TODO: use coroutine AbstractEventLoop.sock_recv(sock, nbytes)
+                # instead of callback get_notification
                 await watch(pg_conn)
     except asyncio.CancelledError:
         print('Task catch_notify canceled!')
@@ -42,8 +50,16 @@ async def worker(ev):
     try:
         while True:
             await ev.wait()
-            print('!!! worker receive')
+            print('!!! worker receive %s' % (ev.data,))
+            # some work here
+            await asyncio.sleep(3)
+            print('!!! worker finish')
             ev.clear()
+            try:
+                task = deferred_tasks.pop(0)
+                print('!!! Worker get deferred task %s' % (task,))
+            except IndexError:
+                print('!!! deferred tasks are empty')
     except asyncio.CancelledError:
         print('Worker canceled!')
 
