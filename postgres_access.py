@@ -1,3 +1,6 @@
+import asyncio
+import select
+
 from datetime import datetime
 from typing import Union, List
 
@@ -18,11 +21,25 @@ class PostgresAccess:
     """
 
     # TODO: add psycopg2.extras.execute_values for inserting multiple rows
-    def __init__(self, connection):
+    # TODO: add typing to init args
+    def __init__(self, connection, loop=None):
+        """
+
+        :param connection: connection to Postgres
+        :param loop: asyncio loop
+        """
         self.__conn = connection
-        self.__conn.autocommit = True
+        if loop is None:
+            self.__conn.autocommit = True
+        else:
+            self.wait(connection)
         self.__cursor = self.__conn.cursor(cursor_factory=DictCursor)
         self.__is_transaction = False
+        self.__loop = loop
+        self.execute = self.execute_async if loop is not None \
+            else self.execute_normal
+        self.result = None
+        self.ev = asyncio.Event()
 
     def __enter__(self):
         return self
@@ -46,6 +63,33 @@ class PostgresAccess:
         except psycopg2.Error as e:
             raise DBException(e)
 
+    def __cursor_retrieve_async(
+            self, method: Union[None, str]
+    ):
+        """Method for retrieving data from database,
+        used after executing query.
+
+        :param method: method of retrieving (fetch, fetchall ...)
+        :return: different methods/attributes returns different results
+            (fetchone - returns tuple,
+             fetchall - returns list of psycopg2.extras.DictRow's,
+             rowcount - this attribute specifies the number of rows
+                        that the last query produced)
+        """
+        print('!!! __cursor_retrieve_async')
+        self.wait(self.__conn)
+        try:
+            if method is None:
+                self.result = self.__cursor.rowcount
+            else:
+                self.result = getattr(self.__cursor, method)()
+            print('!!! result', self.result)
+            print('!!! method', method)
+            self.__loop.remove_reader(self.__conn)
+            self.ev.set()
+        except psycopg2.Error as e:
+            raise DBException(e)
+
     def __cursor_retrieve(
             self, method: Union[None, str]
     ) -> Union[int, tuple, list]:
@@ -66,7 +110,24 @@ class PostgresAccess:
         except psycopg2.Error as e:
             raise DBException(e)
 
-    def __execute(
+    async def __execute_async(
+            self, query: str, params: Union[None, tuple],
+            exec_method: str, retrieve_method: Union[None, str]
+    ):
+        """Method for executing query.
+
+        :param query: sql query
+        :param params: parameters of query
+        :param exec_method: method of execution
+            (execute, executemany, callproc ...)
+        :param retrieve_method: method for retrieving data (fetch, fetchall)
+        :return: result of the query
+        """
+        self.__cursor_execute(query, params, exec_method)
+        await self.watch(self.__conn.fileno(), retrieve_method)
+        print('!!! after watch')
+
+    def __execute_normal(
             self, query: str, params: Union[None, tuple],
             exec_method: str, retrieve_method: Union[None, str]
     ) -> Union[int, tuple, list]:
@@ -138,7 +199,24 @@ class PostgresAccess:
             self.__conn.rollback()
             self.__return_autocommit()
 
-    def execute(
+    async def execute_async(
+            self, query: str,
+            params: Union[None, tuple]=None,
+            result: bool=False
+    ):
+        """Method for executing query without retrieving result.
+
+        :param query: sql query
+        :param params: parameters of query
+        :param result: flag to determine whether to return the query result,
+            if False method returns number of rows produced by query
+        :return: number of rows that query produced
+        """
+        retrieve_method = 'fetchall' if result else None
+        await self.__execute_async(query, params, 'execute', retrieve_method)
+        print('!!! after __execute_async')
+
+    def execute_normal(
             self, query: str,
             params: Union[None, tuple]=None,
             result: bool=False
@@ -152,4 +230,29 @@ class PostgresAccess:
         :return: number of rows that query produced
         """
         retrieve_method = 'fetchall' if result else None
-        return self.__execute(query, params, 'execute', retrieve_method)
+        return self.__execute_normal(query, params, 'execute', retrieve_method)
+
+    async def watch(self, fd, retrieve_method):
+        print('!!! watch')
+        self.__loop.add_reader(
+            fd,
+            self.__cursor_retrieve_async,
+            retrieve_method
+        )
+        print('!!! before await event')
+        await self.ev.wait()
+        print('!!! after await event')
+        self.ev.clear()
+
+    def wait(self, conn):
+        # TODO: redesign
+        while 1:
+            state = conn.poll()
+            if state == psycopg2.extensions.POLL_OK:
+                break
+            elif state == psycopg2.extensions.POLL_WRITE:
+                select.select([], [conn.fileno()], [])
+            elif state == psycopg2.extensions.POLL_READ:
+                select.select([conn.fileno()], [], [])
+            else:
+                raise psycopg2.OperationalError("poll() returned %s" % state)

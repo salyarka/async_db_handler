@@ -40,19 +40,18 @@ async def catch_notify():
         with PostgresAccess(pg_conn) as db:
             db.execute('LISTEN task;')
             while True:
-                # TODO: use coroutine AbstractEventLoop.sock_recv(sock, nbytes)
-                # instead of callback get_notification
                 await watch(pg_conn)
     except asyncio.CancelledError:
         print('Task catch_notify canceled!')
 
-async def worker(ev):
+async def worker(ev, conn):
     try:
         while True:
             await ev.wait()
             print('!!! worker receive %s' % (ev.data,))
-            # some work here
-            await asyncio.sleep(3)
+            with PostgresAccess(conn, loop) as db:
+                await db.execute('SELECT pg_sleep(5);', result=True)
+                print('!!! query result', db.result)
             print('!!! worker finish')
             ev.clear()
             try:
@@ -86,9 +85,6 @@ for signame in ('SIGINT', 'SIGTERM'):
         functools.partial(asyncio.ensure_future, stop())
     )
 
-for i in range(10):
-    asyncio.ensure_future(worker(evs[i]), loop=loop)
-asyncio.ensure_future(catch_notify(), loop=loop)
 
 # if __name__ == '__main__':
 pg_uri = os.getenv('PG_URI')
@@ -96,6 +92,12 @@ if pg_uri is None:
     print('Environment variable PG_URI is not defined!!!')
     exit(1)
 pg_conn = connect(pg_uri)
+workers_conns = [connect(pg_uri, async=True) for each in range(10)]
+
+for i in range(10):
+    asyncio.ensure_future(worker(evs[i], workers_conns[i]), loop=loop)
+asyncio.ensure_future(catch_notify(), loop=loop)
+
 try:
     loop.run_forever()
 finally:
