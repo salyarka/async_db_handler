@@ -4,23 +4,28 @@ import select
 from datetime import datetime
 from typing import Union, List
 
-import psycopg2
-
+from psycopg2 import Error
+from psycopg2.extensions import POLL_OK, POLL_WRITE, POLL_READ
 from psycopg2.extras import DictCursor, DictRow
 
 from exceptions import DBException
 
 
-class PostgresAccess:
-    """Class for access postgres db
+# TODO:
+#       - add descriptions and typings
+#       - ???make db listener as separated class???
+#       - ???redesign wait and watch methods???
+
+class AsyncPostgresAccess:
+    """Class for access postgres db in async mode
     Attention: work with the instances of the class
     should be implemented in with statement. Example of usage:
 
-           with PostgresAccess() as db:
-               result = db.execute(...)
+           with AsyncPostgresAccess() as db:
+               await db.execute(...)
+               result = db.result
     """
 
-    # TODO: add psycopg2.extras.execute_values for inserting multiple rows
     # TODO: add typing to init args
     def __init__(self, connection, loop=None):
         """
@@ -60,7 +65,7 @@ class PostgresAccess:
         """
         try:
             return getattr(self.__cursor, method)(query, params)
-        except psycopg2.Error as e:
+        except Error as e:
             raise DBException(e)
 
     def __cursor_retrieve_async(
@@ -76,18 +81,15 @@ class PostgresAccess:
              rowcount - this attribute specifies the number of rows
                         that the last query produced)
         """
-        print('!!! __cursor_retrieve_async')
         self.wait(self.__conn)
         try:
             if method is None:
                 self.result = self.__cursor.rowcount
             else:
                 self.result = getattr(self.__cursor, method)()
-            print('!!! result', self.result)
-            print('!!! method', method)
             self.__loop.remove_reader(self.__conn)
             self.ev.set()
-        except psycopg2.Error as e:
+        except Error as e:
             raise DBException(e)
 
     def __cursor_retrieve(
@@ -107,7 +109,7 @@ class PostgresAccess:
             if method is None:
                 return self.__cursor.rowcount
             return getattr(self.__cursor, method)()
-        except psycopg2.Error as e:
+        except Error as e:
             raise DBException(e)
 
     async def __execute_async(
@@ -124,8 +126,7 @@ class PostgresAccess:
         :return: result of the query
         """
         self.__cursor_execute(query, params, exec_method)
-        await self.watch(self.__conn.fileno(), retrieve_method)
-        print('!!! after watch')
+        await self.__watch(self.__conn.fileno(), retrieve_method)
 
     def __execute_normal(
             self, query: str, params: Union[None, tuple],
@@ -214,7 +215,6 @@ class PostgresAccess:
         """
         retrieve_method = 'fetchall' if result else None
         await self.__execute_async(query, params, 'execute', retrieve_method)
-        print('!!! after __execute_async')
 
     def execute_normal(
             self, query: str,
@@ -232,27 +232,49 @@ class PostgresAccess:
         retrieve_method = 'fetchall' if result else None
         return self.__execute_normal(query, params, 'execute', retrieve_method)
 
-    async def watch(self, fd, retrieve_method):
-        print('!!! watch')
+    async def listen(self, chanel):
+        """Method for starting listening chanel.
+
+        :param chanel: chanel to listen
+        :return:
+        """
+
+        await self.execute_async('LISTEN %s;' % chanel)
+
+    async def get_notifications(self):
+        self.__loop.add_reader(self.__conn, self.retrieve_notifications)
+        await self.ev.wait()
+        self.ev.clear()
+        return self.result
+
+    def retrieve_notifications(self):
+        self.__loop.remove_reader(self.__conn)
+        self.__conn.poll()
+        notifications = []
+        while self.__conn.notifies:
+            notification = self.__conn.notifies.pop()
+            notifications.append(notification)
+        self.result = notifications
+        self.ev.set()
+
+    async def __watch(self, fd, retrieve_method):
         self.__loop.add_reader(
             fd,
             self.__cursor_retrieve_async,
             retrieve_method
         )
-        print('!!! before await event')
         await self.ev.wait()
-        print('!!! after await event')
         self.ev.clear()
 
-    def wait(self, conn):
-        # TODO: redesign
+    @staticmethod
+    def wait(conn):
         while 1:
             state = conn.poll()
-            if state == psycopg2.extensions.POLL_OK:
+            if state == POLL_OK:
                 break
-            elif state == psycopg2.extensions.POLL_WRITE:
+            elif state == POLL_WRITE:
                 select.select([], [conn.fileno()], [])
-            elif state == psycopg2.extensions.POLL_READ:
+            elif state == POLL_READ:
                 select.select([conn.fileno()], [], [])
             else:
-                raise psycopg2.OperationalError("poll() returned %s" % state)
+                raise DBException('poll() returned %s' % state)
