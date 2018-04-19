@@ -15,6 +15,7 @@ from exceptions import DBException
 #       - add descriptions and typings
 #       - ???make db listener as separated class???
 #       - ???redesign wait and watch methods???
+#       - ???in old implementation was autocommit, now need commit???
 
 class AsyncPostgresAccess:
     """Class for access postgres db in async mode
@@ -27,23 +28,18 @@ class AsyncPostgresAccess:
     """
 
     # TODO: add typing to init args
-    def __init__(self, connection, loop=None):
+    def __init__(self, connection, loop):
         """
 
         :param connection: connection to Postgres
         :param loop: asyncio loop
         """
         self.__conn = connection
-        if loop is None:
-            self.__conn.autocommit = True
-        else:
-            self.wait(connection)
+        self.wait(connection)
         self.__cursor = self.__conn.cursor(cursor_factory=DictCursor)
         self.__is_transaction = False
         self.__loop = loop
-        self.execute = self.execute_async if loop is not None \
-            else self.execute_normal
-        self.result = None
+        self.__result = None
         self.ev = asyncio.Event()
 
     def __enter__(self):
@@ -84,35 +80,15 @@ class AsyncPostgresAccess:
         self.wait(self.__conn)
         try:
             if method is None:
-                self.result = self.__cursor.rowcount
+                self.__result = self.__cursor.rowcount
             else:
-                self.result = getattr(self.__cursor, method)()
+                self.__result = getattr(self.__cursor, method)()
             self.__loop.remove_reader(self.__conn)
             self.ev.set()
         except Error as e:
             raise DBException(e)
 
-    def __cursor_retrieve(
-            self, method: Union[None, str]
-    ) -> Union[int, tuple, list]:
-        """Method for retrieving data from database,
-        used after executing query.
-
-        :param method: method of retrieving (fetch, fetchall ...)
-        :return: different methods/attributes returns different results
-            (fetchone - returns tuple,
-             fetchall - returns list of psycopg2.extras.DictRow's,
-             rowcount - this attribute specifies the number of rows
-                        that the last query produced)
-        """
-        try:
-            if method is None:
-                return self.__cursor.rowcount
-            return getattr(self.__cursor, method)()
-        except Error as e:
-            raise DBException(e)
-
-    async def __execute_async(
+    async def __execute(
             self, query: str, params: Union[None, tuple],
             exec_method: str, retrieve_method: Union[None, str]
     ):
@@ -127,22 +103,6 @@ class AsyncPostgresAccess:
         """
         self.__cursor_execute(query, params, exec_method)
         await self.__watch(self.__conn.fileno(), retrieve_method)
-
-    def __execute_normal(
-            self, query: str, params: Union[None, tuple],
-            exec_method: str, retrieve_method: Union[None, str]
-    ) -> Union[int, tuple, list]:
-        """Method for executing query.
-
-        :param query: sql query
-        :param params: parameters of query
-        :param exec_method: method of execution
-            (execute, executemany, callproc ...)
-        :param retrieve_method: method for retrieving data (fetch, fetchall)
-        :return: result of the query
-        """
-        self.__cursor_execute(query, params, exec_method)
-        return self.__cursor_retrieve(retrieve_method)
 
     def __return_autocommit(self) -> None:
         """Method for setting attributes after transaction.
@@ -200,7 +160,7 @@ class AsyncPostgresAccess:
             self.__conn.rollback()
             self.__return_autocommit()
 
-    async def execute_async(
+    async def execute(
             self, query: str,
             params: Union[None, tuple]=None,
             result: bool=False
@@ -214,23 +174,8 @@ class AsyncPostgresAccess:
         :return: number of rows that query produced
         """
         retrieve_method = 'fetchall' if result else None
-        await self.__execute_async(query, params, 'execute', retrieve_method)
-
-    def execute_normal(
-            self, query: str,
-            params: Union[None, tuple]=None,
-            result: bool=False
-    ) -> Union[List[DictRow], int]:
-        """Method for executing query without retrieving result.
-
-        :param query: sql query
-        :param params: parameters of query
-        :param result: flag to determine whether to return the query result,
-            if False method returns number of rows produced by query
-        :return: number of rows that query produced
-        """
-        retrieve_method = 'fetchall' if result else None
-        return self.__execute_normal(query, params, 'execute', retrieve_method)
+        await self.__execute(query, params, 'execute', retrieve_method)
+        return self.__result
 
     async def listen(self, chanel):
         """Method for starting listening chanel.
@@ -239,13 +184,13 @@ class AsyncPostgresAccess:
         :return:
         """
 
-        await self.execute_async('LISTEN %s;' % chanel)
+        await self.execute('LISTEN %s;' % chanel)
 
     async def get_notifications(self):
         self.__loop.add_reader(self.__conn, self.retrieve_notifications)
         await self.ev.wait()
         self.ev.clear()
-        return self.result
+        return self.__result
 
     def retrieve_notifications(self):
         self.__loop.remove_reader(self.__conn)
@@ -254,7 +199,7 @@ class AsyncPostgresAccess:
         while self.__conn.notifies:
             notification = self.__conn.notifies.pop()
             notifications.append(notification)
-        self.result = notifications
+        self.__result = notifications
         self.ev.set()
 
     async def __watch(self, fd, retrieve_method):

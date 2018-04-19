@@ -41,8 +41,8 @@ async def worker(ev, conn):
             await ev.wait()
             print('!!! worker receive %s' % (ev.data,))
             with AsyncPostgresAccess(conn, loop) as db:
-                await db.execute('SELECT pg_sleep(5);', result=True)
-                print('!!! query result', db.result)
+                res = await db.execute('SELECT pg_sleep(5);', result=True)
+                print('!!! query result', res)
             print('!!! worker finish')
             ev.clear()
             try:
