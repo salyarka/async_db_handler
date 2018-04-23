@@ -1,7 +1,6 @@
 import asyncio
 import select
 
-from datetime import datetime
 from typing import Union, List, Callable
 
 from psycopg2 import Error
@@ -16,12 +15,12 @@ from exceptions import DBException
 
 
 # TODO:
-#       - ???make db listener as separated class???
 #       - ???redesign wait method???
-#       - ???in old implementation was autocommit, now need commit???
+#       - implement work with transactions
 
 class AsyncPostgresAccess:
-    """Class for access postgres db in async mode
+    """Class for access postgres db in async mode.
+    NOTE: asynchronous connection is always in autocommit mode
     Attention: work with the instances of the class
     should be implemented in with statement. Example of usage:
 
@@ -32,20 +31,16 @@ class AsyncPostgresAccess:
     def __init__(self, conn: connection, loop: asyncio.SelectorEventLoop):
         """
 
-        :param conn: connection to Postgres
+        :param conn: connection to Postgres in asynchronous mode
         :param loop: asyncio loop
         """
         self.__conn = conn
-        self.__wait(conn)
+        self.__wait()
         self.__cur = self.__conn.cursor(cursor_factory=DictCursor)
-        # self.__is_transaction = False
         self.__loop = loop
-        # stores retrieve method of cursor
+        self.__event = asyncio.Event()
         self.__retrieve_method = None
-        # stores result of the query
         self.__result = None
-        # object to indicate that the specified event has occurred
-        self.__ev = asyncio.Event()
 
     def __enter__(self):
         return self
@@ -76,14 +71,14 @@ class AsyncPostgresAccess:
 
         :return:
         """
-        self.__wait(self.__conn)
+        self.__wait()
         try:
             if self.__retrieve_method is None:
                 self.__result = self.__cur.rowcount
             else:
                 self.__result = getattr(self.__cur, self.__retrieve_method)()
             self.__loop.remove_reader(self.__conn.fileno())
-            self.__ev.set()
+            self.__event.set()
         except Error as e:
             raise DBException(e)
 
@@ -115,7 +110,7 @@ class AsyncPostgresAccess:
             notification = self.__conn.notifies.pop()
             notifications.append(notification)
         self.__result = notifications
-        self.__ev.set()
+        self.__event.set()
 
     async def __do_by_response(self, callback: Callable) -> None:
         """Adds callback for read availability event from Postgres connection
@@ -129,77 +124,20 @@ class AsyncPostgresAccess:
         :return:
         """
         self.__loop.add_reader(self.__conn.fileno(), callback)
-        await self.__ev.wait()
-        self.__ev.clear()
+        await self.__event.wait()
+        self.__event.clear()
 
-    @staticmethod
-    def __wait(conn):
+    def __wait(self):
         while 1:
-            state = conn.poll()
+            state = self.__conn.poll()
             if state == POLL_OK:
                 break
             elif state == POLL_WRITE:
-                select.select([], [conn.fileno()], [])
+                select.select([], [self.__conn.fileno()], [])
             elif state == POLL_READ:
-                select.select([conn.fileno()], [], [])
+                select.select([self.__conn.fileno()], [], [])
             else:
                 raise DBException('poll() returned %s' % state)
-
-    # def __return_autocommit(self) -> None:
-    #     """Method for setting attributes after transaction.
-    #     Called after transaction, in all cases(actions were successful or not).
-    #
-    #     :return:
-    #     """
-    #     if self.__is_transaction:
-    #         self.__conn.autocommit = True
-    #         self.__is_transaction = False
-    #
-    # def start_transaction(self) -> None:
-    #     """Method for starting transaction. Example of usage:
-    #
-    #        with PostgresAccess() as db:
-    #            try:
-    #                db.start_transaction()
-    #                ...
-    #                db.execute(...)
-    #                result = db.exec(...)
-    #                db.close_transaction()
-    #            except SomeException as e:
-    #                ...
-    #
-    #     After this method was called it is necessary
-    #     to set connection attribute autocommit to True and
-    #     self.__is_transaction attribute to False. This attributes are set using
-    #     methods close_transaction and rollback_transaction
-    #     (using return_autocommit method), the first is called in cases where
-    #     all actions within transaction were successful and second
-    #     in cases where something was wrong inside transaction.
-    #     :return:
-    #     """
-    #     if not self.__is_transaction:
-    #         self.__conn.autocommit = False
-    #         self.__is_transaction = True
-    #
-    # def close_transaction(self) -> None:
-    #     """Method for closing transaction.
-    #     Called when all actions were successful.
-    #
-    #     :return:
-    #     """
-    #     if self.__is_transaction:
-    #         self.__conn.commit()
-    #         self.__return_autocommit()
-    #
-    # def rollback_transaction(self) -> None:
-    #     """Method for rollback transaction.
-    #     Called when actions were not successful.
-    #
-    #     :return:
-    #     """
-    #     if self.__is_transaction:
-    #         self.__conn.rollback()
-    #         self.__return_autocommit()
 
     async def execute(
             self, query: str,
