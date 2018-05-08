@@ -41,6 +41,8 @@ class AsyncPostgresAccess:
         self.__event = asyncio.Event()
         self.__retrieve_method = None
         self.__result = None
+        self.__ready = False
+        self.__call = None
 
     def __enter__(self):
         return self
@@ -71,16 +73,38 @@ class AsyncPostgresAccess:
 
         :return:
         """
-        self.__wait()
-        try:
-            if self.__retrieve_method is None:
-                self.__result = self.__cur.rowcount
-            else:
-                self.__result = getattr(self.__cur, self.__retrieve_method)()
-            self.__loop.remove_reader(self.__conn.fileno())
-            self.__event.set()
-        except Error as e:
-            raise DBException(e)
+        # self.__wait()
+        if self.__ready:
+            try:
+                if self.__retrieve_method is None:
+                    self.__result = self.__cur.rowcount
+                else:
+                    self.__result = getattr(self.__cur, self.__retrieve_method)()
+                # self.__loop.remove_reader(self.__conn.fileno())
+                self.__event.set()
+                self.__ready = False
+            except Error as e:
+                raise DBException(e)
+        else:
+            self.__call = self.__cursor_retrieve
+            self.check()
+
+    def check(self):
+        print('!!! check')
+        self.__loop.remove_reader(self.__conn.fileno())
+        state = self.__conn.poll()
+        if state == POLL_OK:
+            self.__ready = True
+            self.__call()
+            # break
+        elif state == POLL_WRITE:
+            # select.select([], [self.__conn.fileno()], [])
+            self.__loop.add_reader(self.__conn.fileno(), self.__call)
+        elif state == POLL_READ:
+            # select.select([self.__conn.fileno()], [], [])
+            self.__loop.add_reader(self.__conn.fileno(), self.__call)
+        else:
+            raise DBException('poll() returned %s' % state)
 
     async def __execute(
                 self, query: str, params: Union[None, tuple],
