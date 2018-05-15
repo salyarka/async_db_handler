@@ -3,11 +3,10 @@ import select
 
 from typing import Union, List, Callable
 
-from psycopg2 import Error
+from psycopg2 import Error, connect
 from psycopg2.extensions import (
     POLL_OK, POLL_WRITE,
-    POLL_READ, connection,
-    Notify
+    POLL_READ, Notify
 )
 from psycopg2.extras import DictCursor, DictRow
 
@@ -15,28 +14,27 @@ from exceptions import DBException
 
 
 # TODO:
-#       - ???redesign wait method???
 #       - implement work with transactions
 
 class AsyncPostgresAccess:
     """Class for access postgres db in async mode.
     NOTE: asynchronous connection is always in autocommit mode
     Attention: work with the instances of the class
-    should be implemented in with statement. Example of usage:
+    should be implemented in with statement. Creation of object must be done
+    with create method. Example of usage:
 
-           with AsyncPostgresAccess() as db:
+           postgres_access = await AsyncPostgresAccess.create(uri, loop)
+           with postgres_access as db:
                result = await db.execute(...)
     """
 
-    def __init__(self, conn: connection, loop: asyncio.SelectorEventLoop):
+    def __init__(self, uri: str, loop: asyncio.SelectorEventLoop):
         """
 
-        :param conn: connection to Postgres in asynchronous mode
+        :param uri: Postgres address
         :param loop: asyncio loop
         """
-        self.__conn = conn
-        self.__wait()
-        self.__cur = self.__conn.cursor(cursor_factory=DictCursor)
+        self.__conn = connect(uri, async=True)
         self.__loop = loop
         self.__event = asyncio.Event()
         self.__retrieve_method = None
@@ -49,6 +47,32 @@ class AsyncPostgresAccess:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         pass
+
+    @classmethod
+    async def create(cls, uri, loop):
+        instance = AsyncPostgresAccess(uri, loop)
+        await instance._init()
+        return instance
+
+    def __set_event(self):
+        print('!!! __set_event')
+        print('!!! self.__ready', self.__ready)
+        if self.__ready:
+            self.__loop.remove_writer(self.__conn.fileno())
+            self.__event.set()
+            self.__ready = False
+        else:
+            self.check()
+
+    async def _init(self):
+        self.__call = self.__set_event
+        self.__loop.add_reader(self.__conn.fileno(), self.__call)
+        self.check()
+        await self.__event.wait()
+        print('!!! after event wait')
+        self.__event.clear()
+        self.__ready = False
+        self.__cur = self.__conn.cursor(cursor_factory=DictCursor)
 
     def __cursor_execute(
             self, query: str, params: tuple, method: str
@@ -93,13 +117,14 @@ class AsyncPostgresAccess:
         print('!!! check')
         self.__loop.remove_reader(self.__conn.fileno())
         state = self.__conn.poll()
+        print('!!! state', state)
         if state == POLL_OK:
             self.__ready = True
             self.__call()
             # break
         elif state == POLL_WRITE:
             # select.select([], [self.__conn.fileno()], [])
-            self.__loop.add_reader(self.__conn.fileno(), self.__call)
+            self.__loop.add_writer(self.__conn.fileno(), self.__call)
         elif state == POLL_READ:
             # select.select([self.__conn.fileno()], [], [])
             self.__loop.add_reader(self.__conn.fileno(), self.__call)

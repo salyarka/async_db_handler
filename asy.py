@@ -3,18 +3,18 @@ import functools
 import signal
 import os
 
-from psycopg2 import connect
-
 from postgres_access import AsyncPostgresAccess
 
 
 # TODO: RuntimeWarning: coroutine 'stop' was never awaited
 
-async def catch_notify(queue, conn):
+async def catch_notify(queue, uri):
     try:
         loop = asyncio.get_event_loop()
-        with AsyncPostgresAccess(conn, loop) as db:
+        pa = await AsyncPostgresAccess.create(uri, loop)
+        with pa as db:
             await db.listen('task')
+            print('!!! after await db.listen')
             while True:
                 notifications = await db.get_notifications()
                 print('Got notifications from Postgres', notifications)
@@ -24,13 +24,14 @@ async def catch_notify(queue, conn):
         pass
 
 
-async def do_work(queue, conn, number):
+async def do_work(queue, uri, number):
     try:
         loop = asyncio.get_event_loop()
+        pa = await AsyncPostgresAccess.create(uri, loop)
         while True:
             notification = await queue.get()
             print('Worker %s receive %s' % (number, notification))
-            with AsyncPostgresAccess(conn, loop) as db:
+            with pa as db:
                 res = await db.execute('SELECT pg_sleep(5);', result=True)
                 print('Query result', res)
             print('Worker %s finish' % (number,))
@@ -67,11 +68,6 @@ if __name__ == '__main__':
         print('Environment variable WORKERS_NUM must be an integer!!!')
         exit(1)
 
-    listener_conn = connect(settings['PG_URI'], async=True)
-    workers_conns = [
-        connect(settings['PG_URI'], async=True)
-        for each in range(workers_num)
-    ]
     event_loop = asyncio.get_event_loop()
     q = asyncio.Queue()
 
@@ -82,8 +78,8 @@ if __name__ == '__main__':
         )
 
     for i in range(workers_num):
-        asyncio.ensure_future(do_work(q, workers_conns[i], i), loop=event_loop)
-    asyncio.ensure_future(catch_notify(q, listener_conn), loop=event_loop)
+        asyncio.ensure_future(do_work(q, settings['PG_URI'], i), loop=event_loop)
+    asyncio.ensure_future(catch_notify(q, settings['PG_URI']), loop=event_loop)
 
     try:
         event_loop.run_forever()
