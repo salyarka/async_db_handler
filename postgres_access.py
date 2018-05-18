@@ -1,5 +1,4 @@
 import asyncio
-import select
 
 from typing import Union, List, Callable
 
@@ -39,7 +38,7 @@ class AsyncPostgresAccess:
         self.__event = asyncio.Event()
         self.__retrieve_method = None
         self.__result = None
-        self.__ready = False
+        self.__connected = False
         self.__call = None
 
     def __enter__(self):
@@ -54,24 +53,21 @@ class AsyncPostgresAccess:
         await instance._init()
         return instance
 
-    def __set_event(self):
-        print('!!! __set_event')
-        print('!!! self.__ready', self.__ready)
-        if self.__ready:
+    def __wait_connection(self):
+        # if self.__ready:
+        if self.__connected:
             self.__loop.remove_writer(self.__conn.fileno())
             self.__event.set()
-            self.__ready = False
+            # self.__ready = False
         else:
-            self.check()
+            self.__check()
 
     async def _init(self):
-        self.__call = self.__set_event
+        self.__call = self.__wait_connection
         self.__loop.add_reader(self.__conn.fileno(), self.__call)
-        self.check()
+        self.__check()
         await self.__event.wait()
-        print('!!! after event wait')
         self.__event.clear()
-        self.__ready = False
         self.__cur = self.__conn.cursor(cursor_factory=DictCursor)
 
     def __cursor_execute(
@@ -97,36 +93,23 @@ class AsyncPostgresAccess:
 
         :return:
         """
-        # self.__wait()
-        if self.__ready:
-            try:
-                if self.__retrieve_method is None:
-                    self.__result = self.__cur.rowcount
-                else:
-                    self.__result = getattr(self.__cur, self.__retrieve_method)()
-                # self.__loop.remove_reader(self.__conn.fileno())
-                self.__event.set()
-                self.__ready = False
-            except Error as e:
-                raise DBException(e)
-        else:
-            self.__call = self.__cursor_retrieve
-            self.check()
+        try:
+            if self.__retrieve_method is None:
+                self.__result = self.__cur.rowcount
+            else:
+                self.__result = getattr(self.__cur, self.__retrieve_method)()
+            self.__event.set()
+        except Error as e:
+            raise DBException(e)
 
-    def check(self):
-        print('!!! check')
-        self.__loop.remove_reader(self.__conn.fileno())
+    def __check(self):
         state = self.__conn.poll()
-        print('!!! state', state)
         if state == POLL_OK:
-            self.__ready = True
+            self.__connected = True
             self.__call()
-            # break
         elif state == POLL_WRITE:
-            # select.select([], [self.__conn.fileno()], [])
             self.__loop.add_writer(self.__conn.fileno(), self.__call)
         elif state == POLL_READ:
-            # select.select([self.__conn.fileno()], [], [])
             self.__loop.add_reader(self.__conn.fileno(), self.__call)
         else:
             raise DBException('poll() returned %s' % state)
@@ -152,7 +135,6 @@ class AsyncPostgresAccess:
 
         :return:
         """
-        self.__loop.remove_reader(self.__conn.fileno())
         self.__conn.poll()
         notifications = []
         while self.__conn.notifies:
@@ -172,21 +154,10 @@ class AsyncPostgresAccess:
             from event loop.
         :return:
         """
-        self.__loop.add_reader(self.__conn.fileno(), callback)
+        self.__call = callback
+        self.__loop.add_reader(self.__conn.fileno(), self.__check)
         await self.__event.wait()
         self.__event.clear()
-
-    def __wait(self):
-        while 1:
-            state = self.__conn.poll()
-            if state == POLL_OK:
-                break
-            elif state == POLL_WRITE:
-                select.select([], [self.__conn.fileno()], [])
-            elif state == POLL_READ:
-                select.select([self.__conn.fileno()], [], [])
-            else:
-                raise DBException('poll() returned %s' % state)
 
     async def execute(
             self, query: str,
