@@ -1,0 +1,3 @@
+Example application that demonstrates usage of psycopg2 async mode
+with asyncio. Application listens postgres channel for notifications
+and pass tasks to workers when notification arives.
