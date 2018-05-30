@@ -14,7 +14,6 @@ async def catch_notify(queue, uri):
         pa = await AsyncPostgresAccess.create(uri, loop)
         with pa as db:
             await db.listen('task')
-            print('!!! after await db.listen')
             while True:
                 notifications = await db.get_notifications()
                 print('Got notifications from Postgres', notifications)
@@ -28,14 +27,13 @@ async def do_work(queue, uri, number):
     try:
         loop = asyncio.get_event_loop()
         pa = await AsyncPostgresAccess.create(uri, loop)
-        while True:
-            notification = await queue.get()
-            print('Worker %s receive %s' % (number, notification))
-            with pa as db:
+        with pa as db:
+            while True:
+                notification = await queue.get()
+                print('Worker %s receive %s' % (number, notification))
                 res = await db.execute('SELECT pg_sleep(5);', result=True)
-                print('Query result', res)
-            print('Worker %s finish' % (number,))
-            queue.task_done()
+                print('Worker %s finish with result %s' % (number, res))
+                queue.task_done()
     except asyncio.CancelledError:
         pass
 
