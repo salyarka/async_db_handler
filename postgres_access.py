@@ -49,60 +49,52 @@ class AsyncPostgresAccess:
 
     @classmethod
     async def create(cls, uri, loop):
+        """Creates AsyncPostgresAccess instance and wait for connection
+        to Postgres.
+
+        :param uri: Postgres address
+        :param loop: asyncio loop
+        :return: AsyncPostgresAccess instance
+        """
         instance = AsyncPostgresAccess(uri, loop)
-        await instance._init()
+        await instance.__init()
         return instance
 
-    def __wait_connection(self):
-        # if self.__ready:
-        if self.__connected:
-            self.__loop.remove_writer(self.__conn.fileno())
-            self.__event.set()
-            # self.__ready = False
-        else:
-            self.__check()
-
-    async def _init(self):
-        self.__call = self.__wait_connection
-        self.__loop.add_reader(self.__conn.fileno(), self.__call)
-        self.__check()
-        await self.__event.wait()
-        self.__event.clear()
-        self.__cur = self.__conn.cursor(cursor_factory=DictCursor)
-
-    def __cursor_execute(
-            self, query: str, params: tuple, method: str
-    ) -> Union[None, str]:
-        """Method for executing commands for cursor.
-
-        :param query: sql query
-        :param params: parameters of query
-        :param method: execute method of cursor (execute, mogrify, callproc...)
-        :return: different methods returns different results
-            (execute - returns None, mogrify - returns query string ...)
-        """
-        try:
-            return getattr(self.__cur, method)(query, params)
-        except Error as e:
-            raise DBException(e)
-
-    def __cursor_retrieve(self) -> None:
-        """Method for retrieving data from database,
-        used after executing query as a callback,
-        stores result in self.__result attribute
+    async def __init(self) -> None:
+        """Initialize cursor after connection is established.
 
         :return:
         """
-        try:
-            if self.__retrieve_method is None:
-                self.__result = self.__cur.rowcount
-            else:
-                self.__result = getattr(self.__cur, self.__retrieve_method)()
-            self.__event.set()
-        except Error as e:
-            raise DBException(e)
+        self.__call = self.__wait_connection
+        # NOTE: Multiple messaging between postgres and client while connecting.
+        self.__check()
+        await self.__wait_event()
+        self.__cur = self.__conn.cursor(cursor_factory=DictCursor)
 
-    def __check(self):
+    async def __wait_event(self) -> None:
+        """Waits for events set.
+
+        :return:
+        """
+        await self.__event.wait()
+        self.__event.clear()
+
+    def __wait_connection(self) -> None:
+        """Waits for connection to Postgres.
+
+        :return:
+        """
+        if self.__connected:
+            self.__loop.remove_writer(self.__conn.fileno())
+            self.__event.set()
+        else:
+            self.__check()
+
+    def __check(self) -> None:
+        """Checks file descriptor state.
+
+        :return:
+        """
         state = self.__conn.poll()
         if state == POLL_OK:
             self.__connected = True
@@ -118,7 +110,7 @@ class AsyncPostgresAccess:
                 self, query: str, params: Union[None, tuple],
                 exec_method: str
         ) -> None:
-        """Method for executing query.
+        """Starts executing of query.
 
         :param query: sql query
         :param params: parameters of query
@@ -129,19 +121,37 @@ class AsyncPostgresAccess:
         self.__cursor_execute(query, params, exec_method)
         await self.__do_by_response(self.__cursor_retrieve)
 
-    def __retrieve_notifications(self) -> None:
-        """Method used as callback for retrieving notifications from Postgres,
-        stores retrieved notifications to self.__result attribute.
+    def __cursor_execute(
+            self, query: str, params: tuple, method: str
+    ) -> Union[None, str]:
+        """Executes commands for cursor.
+
+        :param query: sql query
+        :param params: parameters of query
+        :param method: execute method of cursor (execute, mogrify, callproc...)
+        :return: different methods returns different results
+            (execute - returns None, mogrify - returns query string ...)
+        """
+        try:
+            return getattr(self.__cur, method)(query, params)
+        except Error as e:
+            raise DBException(e)
+
+    def __cursor_retrieve(self) -> None:
+        """Retrieves data from database,
+        used after executing query as a callback,
+        stores result in self.__result attribute
 
         :return:
         """
-        self.__conn.poll()
-        notifications = []
-        while self.__conn.notifies:
-            notification = self.__conn.notifies.pop()
-            notifications.append(notification)
-        self.__result = notifications
-        self.__event.set()
+        try:
+            if self.__retrieve_method is None:
+                self.__result = self.__cur.rowcount
+            else:
+                self.__result = getattr(self.__cur, self.__retrieve_method)()
+            self.__event.set()
+        except Error as e:
+            raise DBException(e)
 
     async def __do_by_response(self, callback: Callable) -> None:
         """Adds callback for read availability event from Postgres connection
@@ -156,15 +166,28 @@ class AsyncPostgresAccess:
         """
         self.__call = callback
         self.__loop.add_reader(self.__conn.fileno(), self.__check)
-        await self.__event.wait()
-        self.__event.clear()
+        await self.__wait_event()
+
+    def __retrieve_notifications(self) -> None:
+        """Used as callback for retrieving notifications from Postgres,
+        stores retrieved notifications to self.__result attribute.
+
+        :return:
+        """
+        self.__conn.poll()
+        notifications = []
+        while self.__conn.notifies:
+            notification = self.__conn.notifies.pop()
+            notifications.append(notification)
+        self.__result = notifications
+        self.__event.set()
 
     async def execute(
             self, query: str,
             params: Union[None, tuple]=None,
             result: bool=False
     ) -> Union[List[DictRow], int]:
-        """Method for executing query.
+        """Executes query.
 
         :param query: sql query
         :param params: parameters of query
@@ -178,7 +201,7 @@ class AsyncPostgresAccess:
         return self.__result
 
     async def listen(self, chanel) -> None:
-        """Method for starting listening chanel.
+        """Starts listening chanel.
 
         :param chanel: chanel to listen
         :return:
@@ -186,7 +209,7 @@ class AsyncPostgresAccess:
         await self.execute('LISTEN %s;' % chanel)
 
     async def get_notifications(self) -> List[Notify]:
-        """Method for receiving notifications from Postgres, adds callback for
+        """Receives notifications from Postgres, adds callback for
         read availability event from Postgres connection file descriptor.
 
         :return: list of notifications from Postgres
