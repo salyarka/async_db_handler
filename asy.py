@@ -1,12 +1,9 @@
 import asyncio
-import functools
 import signal
 import os
 
 from postgres_access import AsyncPostgresAccess
 
-
-# TODO: RuntimeWarning: coroutine 'stop' was never awaited
 
 async def catch_notify(queue, uri):
     try:
@@ -72,7 +69,7 @@ if __name__ == '__main__':
     for signame in ('SIGINT', 'SIGTERM'):
         event_loop.add_signal_handler(
             getattr(signal, signame),
-            functools.partial(asyncio.ensure_future, stop())
+            lambda: asyncio.ensure_future(stop())
         )
 
     for i in range(workers_num):
