@@ -17,7 +17,7 @@ async def catch_notify(queue, uri):
                 for n in notifications:
                     queue.put_nowait(n)
     except asyncio.CancelledError:
-        pass
+        print('Notify receiver stopped.')
 
 
 async def do_work(queue, uri, number):
@@ -28,11 +28,12 @@ async def do_work(queue, uri, number):
             while True:
                 notification = await queue.get()
                 print('Worker %s receive %s' % (number, notification))
+                # simulating query
                 res = await db.execute('SELECT pg_sleep(5);', result=True)
                 print('Worker %s finish with result %s' % (number, res))
                 queue.task_done()
     except asyncio.CancelledError:
-        pass
+        print('Worker %s stopped.' % number)
 
 
 async def stop():
@@ -72,7 +73,7 @@ if __name__ == '__main__':
             lambda: asyncio.ensure_future(stop())
         )
 
-    for i in range(workers_num):
+    for i in range(1, workers_num + 1):
         asyncio.ensure_future(do_work(q, settings['PG_URI'], i), loop=event_loop)
     asyncio.ensure_future(catch_notify(q, settings['PG_URI']), loop=event_loop)
 
